@@ -1,0 +1,10 @@
+services:
+  - type: worker
+    name: public-diamond-bot
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python diamond_price_bot.py
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false 
