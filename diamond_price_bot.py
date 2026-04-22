@@ -5,25 +5,13 @@ from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
 from typing import Dict
 
 from flask import Flask, request
-from telegram import (
-    BotCommand,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    Update,
-)
-from telegram.ext import (
-    Application,
-    CallbackQueryHandler,
-    CommandHandler,
-    ContextTypes,
-    MessageHandler,
-    filters,
-)
+from telegram import BotCommand, KeyboardButton, ReplyKeyboardMarkup, Update
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "diamond-secret")
 PORT = int(os.getenv("PORT", "10000"))
-RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "")
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -79,17 +67,16 @@ PASS_PACKS: Dict[str, Decimal] = {
 }
 
 
-def main_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("📋 Pack List", callback_data="pack_list"),
-                InlineKeyboardButton("💎 Example Price", callback_data="example_price"),
-            ],
-            [
-                InlineKeyboardButton("ℹ️ Help", callback_data="help"),
-            ],
-        ]
+def main_keyboard() -> ReplyKeyboardMarkup:
+    keyboard = [
+        [KeyboardButton("📋 Pack List"), KeyboardButton("💎 Example Price")],
+        [KeyboardButton("ℹ️ Help")],
+    ]
+    return ReplyKeyboardMarkup(
+        keyboard,
+        resize_keyboard=True,
+        one_time_keyboard=False,
+        input_field_placeholder="83.5+2.5% ရိုက်ပါ",
     )
 
 
@@ -206,21 +193,16 @@ async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"{build_pack_section('🎟 Pass / Bundle', PASS_PACKS)}\n\n"
         "╚════════════════════╝"
     )
-    await send_long_message(update.message, text)
+    await send_long_message(update.message, text, reply_markup=main_keyboard())
 
 
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    if not query:
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.message.text:
         return
 
-    await query.answer()
+    user_text = update.message.text.strip()
 
-    if query.data == "help":
-        await query.message.reply_text(usage_text(), reply_markup=main_keyboard())
-        return
-
-    if query.data == "pack_list":
+    if user_text == "📋 Pack List":
         text = (
             "╔════〔 𝗣𝗨𝗕𝗟𝗜𝗖 𝗣𝗔𝗖𝗞 𝗟𝗜𝗦𝗧 〕════╗\n\n"
             f"{build_pack_section('🌟 Normal Pack', NORMAL_PACKS)}\n\n"
@@ -228,10 +210,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             f"{build_pack_section('🎟 Pass / Bundle', PASS_PACKS)}\n\n"
             "╚════════════════════╝"
         )
-        await send_long_message(query.message, text)
+        await send_long_message(update.message, text, reply_markup=main_keyboard())
         return
 
-    if query.data == "example_price":
+    if user_text == "💎 Example Price":
         rate = Decimal("83.5")
         profit = Decimal("2")
         text = (
@@ -244,15 +226,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             f"{build_price_section('🎟 Pass / Bundle', PASS_PACKS, rate, profit)}\n\n"
             "╚════════════════════╝"
         )
-        await send_long_message(query.message, text)
+        await send_long_message(update.message, text, reply_markup=main_keyboard())
         return
 
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message or not update.message.text:
+    if user_text == "ℹ️ Help":
+        await update.message.reply_text(usage_text(), reply_markup=main_keyboard())
         return
 
-    user_text = update.message.text.strip()
     rate, profit, error = parse_user_input(user_text)
 
     if error == "format":
@@ -263,8 +243,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "83+2%\n"
             "83.5+2%\n"
             "82.3+1.5%\n"
-            "/list\n"
-            "/help\n"
             "╚════════════════════╝",
             reply_markup=main_keyboard(),
         )
@@ -302,7 +280,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         f"{build_price_section('🎟 Pass / Bundle', PASS_PACKS, rate, profit)}\n\n"
         "╚════════════════════╝"
     )
-    await send_long_message(update.message, result_text)
+    await send_long_message(update.message, result_text, reply_markup=main_keyboard())
 
 
 async def post_init(app: Application) -> None:
@@ -319,16 +297,17 @@ telegram_app = Application.builder().token(TOKEN).build()
 telegram_app.add_handler(CommandHandler("start", start))
 telegram_app.add_handler(CommandHandler("help", help_command))
 telegram_app.add_handler(CommandHandler("list", list_command))
-telegram_app.add_handler(CallbackQueryHandler(button_handler))
 telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 flask_app = Flask(__name__)
-
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
 _initialized = False
 
 
-async def init_telegram():
+async def init_telegram() -> None:
     global _initialized
+
     if _initialized:
         return
 
@@ -338,6 +317,7 @@ async def init_telegram():
         raise RuntimeError("RENDER_EXTERNAL_URL env var မထည့်ရသေးပါ")
 
     await telegram_app.initialize()
+    await telegram_app.start()
     await post_init(telegram_app)
 
     webhook_url = f"{RENDER_EXTERNAL_URL}/webhook/{WEBHOOK_SECRET}"
@@ -347,28 +327,24 @@ async def init_telegram():
     _initialized = True
 
 
+@flask_app.before_request
+def ensure_initialized():
+    global _initialized
+    if not _initialized:
+        loop.run_until_complete(init_telegram())
+
+
 @flask_app.get("/")
 def health():
-    try:
-        asyncio.run(init_telegram())
-    except Exception as e:
-        logger.exception("Init failed: %s", e)
-        return f"Init failed: {e}", 500
-
     return "Diamond bot is running", 200
 
 
 @flask_app.post(f"/webhook/{WEBHOOK_SECRET}")
 def webhook():
-    try:
-        asyncio.run(init_telegram())
-        data = request.get_json(force=True)
-        update = Update.de_json(data, telegram_app.bot)
-        asyncio.run(telegram_app.process_update(update))
-        return "ok", 200
-    except Exception as e:
-        logger.exception("Webhook failed: %s", e)
-        return f"Webhook failed: {e}", 500
+    data = request.get_json(force=True)
+    update = Update.de_json(data, telegram_app.bot)
+    loop.run_until_complete(telegram_app.process_update(update))
+    return "ok", 200
 
 
 if __name__ == "__main__":
