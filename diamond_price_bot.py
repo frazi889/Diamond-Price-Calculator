@@ -3,6 +3,7 @@ import os
 from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
 from typing import Dict
 
+from flask import Flask, request
 from telegram import (
     BotCommand,
     InlineKeyboardButton,
@@ -18,7 +19,13 @@ from telegram.ext import (
     filters,
 )
 
+# =========================
+# CONFIG
+# =========================
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "diamond-secret")
+PORT = int(os.getenv("PORT", "10000"))
+RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "")
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -26,6 +33,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# =========================
+# PACK DATA
+# =========================
 NORMAL_PACKS: Dict[str, Decimal] = {
     "86wp": Decimal("137.50"),
     "86wp2": Decimal("213.50"),
@@ -73,7 +83,9 @@ PASS_PACKS: Dict[str, Decimal] = {
     "meb (Monthly Epic Bundle)": Decimal("196.50"),
 }
 
-
+# =========================
+# HELPERS
+# =========================
 def main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -133,22 +145,30 @@ def build_price_section(title: str, packs: Dict[str, Decimal], rate: Decimal, pr
     return f"{title}\n" + "\n".join(rows)
 
 
-async def send_long_message(message_obj, text: str) -> None:
+async def send_long_message(message_obj, text: str, reply_markup=None) -> None:
     max_len = 3800
     if len(text) <= max_len:
-        await message_obj.reply_text(text)
+        await message_obj.reply_text(text, reply_markup=reply_markup)
         return
 
     current = ""
+    first_chunk = True
     for line in text.splitlines(True):
         if len(current) + len(line) > max_len:
-            await message_obj.reply_text(current)
+            await message_obj.reply_text(
+                current,
+                reply_markup=reply_markup if first_chunk else None,
+            )
+            first_chunk = False
             current = line
         else:
             current += line
 
     if current:
-        await message_obj.reply_text(current)
+        await message_obj.reply_text(
+            current,
+            reply_markup=reply_markup if first_chunk else None,
+        )
 
 
 def parse_user_input(text: str):
@@ -172,6 +192,9 @@ def parse_user_input(text: str):
     return rate, profit, None
 
 
+# =========================
+# TG HANDLERS
+# =========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message:
         await update.message.reply_text(usage_text(), reply_markup=main_keyboard())
@@ -302,21 +325,54 @@ async def post_init(app: Application) -> None:
     )
 
 
-def main() -> None:
+# =========================
+# FLASK WEBHOOK
+# =========================
+flask_app = Flask(__name__)
+telegram_app = Application.builder().token(TOKEN).post_init(post_init).build()
+
+telegram_app.add_handler(CommandHandler("start", start))
+telegram_app.add_handler(CommandHandler("help", help_command))
+telegram_app.add_handler(CommandHandler("list", list_command))
+telegram_app.add_handler(CallbackQueryHandler(button_handler))
+telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+
+@flask_app.get("/")
+def health():
+    return "Diamond bot is running", 200
+
+
+@flask_app.post(f"/webhook/{WEBHOOK_SECRET}")
+def webhook():
+    data = request.get_json(force=True)
+    update = Update.de_json(data, telegram_app.bot)
+
+    import asyncio
+    asyncio.run(telegram_app.process_update(update))
+    return "ok", 200
+
+
+def setup_webhook() -> None:
     if not TOKEN:
         raise RuntimeError("TELEGRAM_BOT_TOKEN env var မထည့်ရသေးပါ")
+    if not RENDER_EXTERNAL_URL:
+        raise RuntimeError("RENDER_EXTERNAL_URL env var မထည့်ရသေးပါ")
 
-    app = Application.builder().token(TOKEN).post_init(post_init).build()
+    webhook_url = f"{RENDER_EXTERNAL_URL}/webhook/{WEBHOOK_SECRET}"
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("list", list_command))
-    app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    import asyncio
 
-    logger.info("Bot started with polling...")
-    app.run_polling(drop_pending_updates=True)
+    async def _setup():
+        await telegram_app.initialize()
+        await telegram_app.start()
+        await telegram_app.bot.set_webhook(webhook_url)
+        logger.info("Webhook set to %s", webhook_url)
 
+    asyncio.run(_setup())
+
+
+setup_webhook()
 
 if __name__ == "__main__":
-    main()
+    flask_app.run(host="0.0.0.0", port=PORT)
